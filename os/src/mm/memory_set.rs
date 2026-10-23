@@ -63,6 +63,28 @@ impl MemorySet {
             None,
         );
     }
+    /// Check whether the virtual page range `[start_vpn, end_vpn)` overlaps
+    /// with any existing map area.
+    pub fn area_overlaps(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        self.areas
+            .iter()
+            .any(|area| area.vpn_range.get_start() < end_vpn && start_vpn < area.vpn_range.get_end())
+    }
+    /// Unmap the map area exactly matching the virtual page range `[start_vpn, end_vpn)`.
+    ///
+    /// Returns `false` when no such area exists, which means the request does not
+    /// describe a region that was mapped before.
+    pub fn unmap_area(&mut self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        if let Some(index) = self.areas.iter().position(|area| {
+            area.vpn_range.get_start() == start_vpn && area.vpn_range.get_end() == end_vpn
+        }) {
+            let mut area = self.areas.remove(index);
+            area.unmap(&mut self.page_table);
+            true
+        } else {
+            false
+        }
+    }
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {

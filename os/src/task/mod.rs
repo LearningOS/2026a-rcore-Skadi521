@@ -15,6 +15,7 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::MemorySet;
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -133,6 +134,38 @@ impl TaskManager {
         inner.tasks[cur].change_program_brk(size)
     }
 
+    /// Increase the syscall count of the current 'Running' task.
+    fn inc_current_syscall_count(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let times = &mut inner.tasks[cur].syscall_times;
+        if syscall_id < times.len() {
+            times[syscall_id] += 1;
+        }
+    }
+
+    /// Get the syscall count of the current 'Running' task.
+    fn get_current_syscall_count(&self, syscall_id: usize) -> isize {
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let times = &inner.tasks[cur].syscall_times;
+        if syscall_id < times.len() {
+            times[syscall_id] as isize
+        } else {
+            -1
+        }
+    }
+
+    /// Run `f` with a mutable reference to the current task's address space.
+    fn with_current_memory_set<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut MemorySet) -> R,
+    {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        f(&mut inner.tasks[cur].memory_set)
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -201,4 +234,22 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Increase the syscall count of the current 'Running' task.
+pub fn increase_syscall_count(syscall_id: usize) {
+    TASK_MANAGER.inc_current_syscall_count(syscall_id);
+}
+
+/// Get the syscall count of the current 'Running' task.
+pub fn current_syscall_count(syscall_id: usize) -> isize {
+    TASK_MANAGER.get_current_syscall_count(syscall_id)
+}
+
+/// Run `f` with a mutable reference to the current task's address space.
+pub fn with_current_memory_set<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut MemorySet) -> R,
+{
+    TASK_MANAGER.with_current_memory_set(f)
 }
