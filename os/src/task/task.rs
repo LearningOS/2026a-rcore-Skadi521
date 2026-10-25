@@ -1,6 +1,6 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
-use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
+use super::{add_task, kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::TRAP_CONTEXT_BASE;
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
@@ -71,6 +71,10 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Scheduling priority of the process. Larger value means higher priority.
+    /// A process may only raise its own priority, never lower it.
+    pub priority: usize,
 }
 
 impl TaskControlBlockInner {
@@ -135,6 +139,7 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 1,
                 })
             },
         };
@@ -216,6 +221,7 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,
                 })
             },
         });
@@ -234,6 +240,68 @@ impl TaskControlBlock {
     /// get pid of process
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+
+    /// Create a new process to execute the given ELF, and add it to the ready queue.
+    ///
+    /// Unlike `fork` + `exec`, the child starts from a brand new address space and
+    /// does not inherit anything from the caller, so the parent address space is
+    /// never copied. Returns the pid of the new process.
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> isize {
+        // memory_set with elf program headers/trampoline/trap context/user stack
+        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let trap_cx_ppn = memory_set
+            .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
+            .unwrap()
+            .ppn();
+        // alloc a pid and a kernel stack in kernel space
+        let pid_handle = pid_alloc();
+        let kernel_stack = kstack_alloc();
+        let kernel_stack_top = kernel_stack.get_top();
+        let task_control_block = Arc::new(TaskControlBlock {
+            pid: pid_handle,
+            kernel_stack,
+            inner: unsafe {
+                UPSafeCell::new(TaskControlBlockInner {
+                    trap_cx_ppn,
+                    base_size: user_sp,
+                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                    task_status: TaskStatus::Ready,
+                    memory_set,
+                    parent: Some(Arc::downgrade(self)),
+                    children: Vec::new(),
+                    exit_code: 0,
+                    fd_table: vec![
+                        // 0 -> stdin
+                        Some(Arc::new(Stdin)),
+                        // 1 -> stdout
+                        Some(Arc::new(Stdout)),
+                        // 2 -> stderr
+                        Some(Arc::new(Stdout)),
+                    ],
+                    heap_bottom: user_sp,
+                    program_brk: user_sp,
+                    priority: 1,
+                })
+            },
+        });
+        // prepare TrapContext in user space
+        let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
+        *trap_cx = TrapContext::app_init_context(
+            entry_point,
+            user_sp,
+            KERNEL_SPACE.exclusive_access().token(),
+            kernel_stack_top,
+            trap_handler as usize,
+        );
+        // add the child into the children list of the caller
+        let pid = task_control_block.getpid();
+        self.inner_exclusive_access()
+            .children
+            .push(task_control_block.clone());
+        // add new task to scheduler
+        add_task(task_control_block);
+        pid as isize
     }
 
     /// change the location of the program break. return None if failed.

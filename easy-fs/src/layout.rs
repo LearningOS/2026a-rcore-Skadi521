@@ -1,4 +1,4 @@
-use super::{get_block_cache, BlockDevice, BLOCK_SZ};
+use super::{get_block_cache, get_block_cache_no_load, BlockDevice, BLOCK_SZ};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::{Debug, Formatter, Result};
@@ -86,6 +86,8 @@ pub struct DiskInode {
     pub indirect1: u32,
     pub indirect2: u32,
     type_: DiskInodeType,
+    /// number of hard links pointing to this inode
+    pub nlink: u32,
 }
 
 impl DiskInode {
@@ -97,6 +99,7 @@ impl DiskInode {
         self.indirect1 = 0;
         self.indirect2 = 0;
         self.type_ = type_;
+        self.nlink = 1;
     }
     /// Whether this inode is a directory
     pub fn is_dir(&self) -> bool {
@@ -367,12 +370,15 @@ impl DiskInode {
             end_current_block = end_current_block.min(end);
             // write and update write size
             let block_write_size = end_current_block - start;
-            get_block_cache(
-                self.get_block_id(start_block as u32, block_device) as usize,
-                Arc::clone(block_device),
-            )
-            .lock()
-            .modify(0, |data_block: &mut DataBlock| {
+            let block_id = self.get_block_id(start_block as u32, block_device) as usize;
+            // a segment covering the whole block needs no read-back of the old content
+            let full_block = start % BLOCK_SZ == 0 && block_write_size == BLOCK_SZ;
+            let cache = if full_block {
+                get_block_cache_no_load(block_id, Arc::clone(block_device))
+            } else {
+                get_block_cache(block_id, Arc::clone(block_device))
+            };
+            cache.lock().modify(0, |data_block: &mut DataBlock| {
                 let src = &buf[write_size..write_size + block_write_size];
                 let dst = &mut data_block[start % BLOCK_SZ..start % BLOCK_SZ + block_write_size];
                 dst.copy_from_slice(src);

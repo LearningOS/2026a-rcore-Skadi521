@@ -27,6 +27,18 @@ impl BlockCache {
             modified: false,
         }
     }
+    /// Create a cache entry for a block that is about to be overwritten in full.
+    ///
+    /// Reading the old content from the device would be wasted work in that case,
+    /// so the buffer starts out empty and the entry is marked dirty.
+    pub fn new_uninit(block_id: usize, block_device: Arc<dyn BlockDevice>) -> Self {
+        Self {
+            cache: [0u8; BLOCK_SZ],
+            block_id,
+            block_device,
+            modified: true,
+        }
+    }
     /// Get the address of an offset inside the cached block data
     fn addr_of_offset(&self, offset: usize) -> usize {
         &self.cache[offset] as *const _ as usize
@@ -74,8 +86,8 @@ impl Drop for BlockCache {
         self.sync()
     }
 }
-/// Use a block cache of 16 blocks
-const BLOCK_CACHE_SIZE: usize = 16;
+/// Use a block cache of 128 blocks
+const BLOCK_CACHE_SIZE: usize = 128;
 
 pub struct BlockCacheManager {
     queue: VecDeque<(usize, Arc<Mutex<BlockCache>>)>,
@@ -92,6 +104,15 @@ impl BlockCacheManager {
         &mut self,
         block_id: usize,
         block_device: Arc<dyn BlockDevice>,
+    ) -> Arc<Mutex<BlockCache>> {
+        self.get_block_cache_inner(block_id, block_device, true)
+    }
+
+    fn get_block_cache_inner(
+        &mut self,
+        block_id: usize,
+        block_device: Arc<dyn BlockDevice>,
+        load: bool,
     ) -> Arc<Mutex<BlockCache>> {
         if let Some(pair) = self.queue.iter().find(|pair| pair.0 == block_id) {
             Arc::clone(&pair.1)
@@ -111,10 +132,11 @@ impl BlockCacheManager {
                 }
             }
             // load block into mem and push back
-            let block_cache = Arc::new(Mutex::new(BlockCache::new(
-                block_id,
-                Arc::clone(&block_device),
-            )));
+            let block_cache = Arc::new(Mutex::new(if load {
+                BlockCache::new(block_id, Arc::clone(&block_device))
+            } else {
+                BlockCache::new_uninit(block_id, Arc::clone(&block_device))
+            }));
             self.queue.push_back((block_id, Arc::clone(&block_cache)));
             block_cache
         }
@@ -134,6 +156,17 @@ pub fn get_block_cache(
     BLOCK_CACHE_MANAGER
         .lock()
         .get_block_cache(block_id, block_device)
+}
+/// Get the block cache for a block that will be overwritten in full.
+///
+/// Falls back to the ordinary cached entry when the block is already resident.
+pub fn get_block_cache_no_load(
+    block_id: usize,
+    block_device: Arc<dyn BlockDevice>,
+) -> Arc<Mutex<BlockCache>> {
+    BLOCK_CACHE_MANAGER
+        .lock()
+        .get_block_cache_inner(block_id, block_device, false)
 }
 /// Sync all block cache to block device
 pub fn block_cache_sync_all() {
