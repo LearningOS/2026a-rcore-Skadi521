@@ -70,6 +70,17 @@ pub fn block_current_and_run_next() {
 
 use crate::board::QEMUExit;
 
+/// The thread id of the currently running task, `None` if it has already exited.
+pub fn current_tid() -> Option<usize> {
+    let task = current_task()?;
+    let tid = task
+        .inner_exclusive_access()
+        .res
+        .as_ref()
+        .map(|res| res.tid);
+    tid
+}
+
 /// Exit the current 'Running' task and run the next task in task list.
 pub fn exit_current_and_run_next(exit_code: i32) {
     trace!(
